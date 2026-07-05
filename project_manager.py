@@ -10,6 +10,85 @@ from datetime import datetime, date
 from PIL import Image
 from fpdf import FPDF
 
+# ── Supabase setup (gracefully disabled if not configured) ──
+DB_ENABLED = False
+db = None
+try:
+    from supabase import create_client
+    _sb_url = st.secrets["SUPABASE_URL"]
+    _sb_key = st.secrets["SUPABASE_KEY"]
+    db = create_client(_sb_url, _sb_key)
+    DB_ENABLED = True
+except Exception:
+    pass
+
+# ── Auth helpers ──
+def _restore_session():
+    if not DB_ENABLED or "sb_access_token" not in st.session_state:
+        return
+    try:
+        db.auth.set_session(
+            st.session_state.sb_access_token,
+            st.session_state.sb_refresh_token
+        )
+    except Exception:
+        for k in ["sb_access_token","sb_refresh_token","sb_user_id","sb_user_email"]:
+            st.session_state.pop(k, None)
+
+def get_user():
+    if not DB_ENABLED or "sb_user_email" not in st.session_state:
+        return None
+    return {"id": st.session_state.sb_user_id, "email": st.session_state.sb_user_email}
+
+def do_sign_in(email, password):
+    res = db.auth.sign_in_with_password({"email": email.strip(), "password": password})
+    st.session_state.sb_access_token  = res.session.access_token
+    st.session_state.sb_refresh_token = res.session.refresh_token
+    st.session_state.sb_user_id       = res.user.id
+    st.session_state.sb_user_email    = res.user.email
+
+def do_sign_up(email, password):
+    return db.auth.sign_up({"email": email.strip(), "password": password})
+
+def do_sign_out():
+    if db:
+        try: db.auth.sign_out()
+        except: pass
+    for k in ["sb_access_token","sb_refresh_token","sb_user_id","sb_user_email"]:
+        st.session_state.pop(k, None)
+
+# ── Project DB helpers ──
+def save_project_to_db(proj):
+    user = get_user()
+    if not user or not DB_ENABLED: return
+    try:
+        db.table("projects").upsert({
+            "id": proj["id"],
+            "user_id": user["id"],
+            "name": proj["name"],
+            "type": proj.get("type",""),
+            "status": proj.get("status","Active"),
+            "project_data": proj
+        }).execute()
+    except Exception as e:
+        pass
+
+def load_projects_from_db():
+    user = get_user()
+    if not user or not DB_ENABLED: return {}
+    try:
+        res = db.table("projects").select("*").eq("user_id", user["id"]).execute()
+        return {r["id"]: r["project_data"] for r in (res.data or [])}
+    except: return {}
+
+def delete_project_from_db(project_id):
+    if not DB_ENABLED: return
+    try:
+        db.table("projects").delete().eq("id", project_id).execute()
+    except: pass
+
+_restore_session()
+
 st.set_page_config(
     page_title="Handy Helper — Project Manager",
     page_icon="🏗️",
@@ -163,6 +242,7 @@ def get_project():
 
 def save_project(proj):
     st.session_state.projects[proj["id"]] = proj
+    save_project_to_db(proj)
 
 def compress_image(file_bytes, max_size_mb=1):
     MAX = max_size_mb * 1024 * 1024
@@ -450,23 +530,78 @@ def sidebar():
                     st.session_state.page = page
                     st.rerun()
 
-        # Save/Load
+        # ── Account & Save/Load ──
         st.markdown("---")
-        st.markdown("<div style='font-size:10px; color:#8A7E76; letter-spacing:1px;'>SAVE / LOAD</div>", unsafe_allow_html=True)
+        user = get_user()
+        if DB_ENABLED:
+            if user:
+                st.markdown(f"""
+                    <div style="background:rgba(232,82,26,0.08); border:1px solid rgba(232,82,26,0.25);
+                        border-radius:8px; padding:0.6rem 0.75rem; margin-bottom:0.5rem;">
+                        <div style="font-size:10px; color:#E8521A; font-family:monospace; letter-spacing:1px;">SIGNED IN</div>
+                        <div style="font-size:11px; color:#F5F0E8; margin-top:2px; word-break:break-all;">{user['email']}</div>
+                        <div style="font-size:10px; color:#8A7E76; margin-top:2px;">☁️ Projects auto-save to cloud</div>
+                    </div>
+                """, unsafe_allow_html=True)
+                if st.button("Sign Out", key="pm_signout", use_container_width=True):
+                    do_sign_out()
+                    st.session_state.projects = {}
+                    st.session_state.active_project_id = None
+                    st.session_state.page = "home"
+                    st.rerun()
+                if st.button("☁️ Load My Projects", key="pm_load_cloud", use_container_width=True):
+                    cloud_projects = load_projects_from_db()
+                    st.session_state.projects.update(cloud_projects)
+                    st.success(f"Loaded {len(cloud_projects)} project(s)!")
+                    st.rerun()
+            else:
+                st.markdown('<div style="font-size:10px; color:#8A7E76; margin-bottom:0.4rem; text-align:center;">Sign in to save projects to the cloud</div>', unsafe_allow_html=True)
+                with st.expander("Sign In / Create Account"):
+                    pm_mode = st.radio("", ["Sign In","Create Account"], key="pm_auth_mode", horizontal=True, label_visibility="collapsed")
+                    pm_email = st.text_input("Email", key="pm_email", placeholder="you@email.com", label_visibility="collapsed")
+                    pm_pass  = st.text_input("Password", key="pm_pass", type="password", placeholder="Password", label_visibility="collapsed")
+                    if pm_mode == "Create Account":
+                        pm_pass2 = st.text_input("Confirm", key="pm_pass2", type="password", placeholder="Confirm password", label_visibility="collapsed")
+                    if st.button("Continue →", key="pm_auth_btn", use_container_width=True):
+                        if not pm_email or not pm_pass:
+                            st.error("Enter email and password.")
+                        elif pm_mode == "Create Account":
+                            if pm_pass != pm_pass2:
+                                st.error("Passwords don't match.")
+                            else:
+                                try:
+                                    do_sign_up(pm_email, pm_pass)
+                                    st.success("Check your email to confirm your account, then sign in.")
+                                except Exception as e:
+                                    st.error(f"Error: {e}")
+                        else:
+                            try:
+                                do_sign_in(pm_email, pm_pass)
+                                cloud = load_projects_from_db()
+                                st.session_state.projects.update(cloud)
+                                st.success(f"Signed in! Loaded {len(cloud)} project(s).")
+                                st.rerun()
+                            except Exception as e:
+                                st.error("Sign in failed — check your credentials.")
+
+        st.markdown("<div style='font-size:10px; color:#8A7E76; letter-spacing:1px; margin-top:0.5rem;'>LOCAL BACKUP</div>", unsafe_allow_html=True)
         if st.session_state.projects:
             all_data = json.dumps(
-                {pid: {k: v for k, v in p.items()} for pid, p in st.session_state.projects.items()},
+                {pid: p for pid, p in st.session_state.projects.items()},
                 indent=2, default=str
             )
-            st.download_button("💾  Save All Projects", data=all_data,
+            st.download_button("💾  Download Backup", data=all_data,
                 file_name=f"handy_helper_projects_{datetime.now().strftime('%Y%m%d')}.json",
                 mime="application/json", use_container_width=True)
-        uploaded = st.file_uploader("📂  Load Projects", type=["json"], label_visibility="collapsed", key="proj_upload")
+        uploaded = st.file_uploader("📂  Restore from Backup", type=["json"], label_visibility="collapsed", key="proj_upload")
         if uploaded:
             try:
                 data = json.loads(uploaded.read())
                 st.session_state.projects.update(data)
-                st.success("Projects loaded!")
+                if get_user():
+                    for proj in data.values():
+                        save_project_to_db(proj)
+                st.success("Projects restored!")
                 st.rerun()
             except Exception as e:
                 st.error(f"Error loading: {e}")
@@ -517,6 +652,7 @@ def page_home():
             with c2:
                 if st.button("🗑️", key=f"del_{pid}", help="Delete project"):
                     del st.session_state.projects[pid]
+                    delete_project_from_db(pid)
                     if st.session_state.active_project_id == pid:
                         st.session_state.active_project_id = None
                         st.session_state.page = "home"
