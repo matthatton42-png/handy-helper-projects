@@ -1,0 +1,4 @@
+anthropic
+streamlit
+Pillow
+fpdf2
