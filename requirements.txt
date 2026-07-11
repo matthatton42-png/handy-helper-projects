@@ -3,3 +3,4 @@ streamlit
 Pillow
 fpdf2
 supabase
+
