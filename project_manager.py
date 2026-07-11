@@ -15,8 +15,8 @@ DB_ENABLED = False
 db = None
 try:
     from supabase import create_client
-    _sb_url = st.secrets["SUPABASE_URL"]
-    _sb_key = st.secrets["SUPABASE_KEY"]
+    _sb_url = os.environ.get("SUPABASE_URL") or st.secrets["SUPABASE_URL"]
+    _sb_key = os.environ.get("SUPABASE_KEY") or st.secrets["SUPABASE_KEY"]
     db = create_client(_sb_url, _sb_key)
     DB_ENABLED = True
 except Exception:
@@ -203,7 +203,7 @@ st.markdown("""
 
 # ── Anthropic client ──
 try:
-    api_key = st.secrets["ANTHROPIC_API_KEY"]
+    api_key = os.environ.get("ANTHROPIC_API_KEY") or st.secrets["ANTHROPIC_API_KEY"]
     client = anthropic.Anthropic(api_key=api_key)
 except Exception:
     client = None
